@@ -74,6 +74,46 @@ const fragmentShader = `
   }
 `;
 
+const starVertexShader = `
+  attribute float size;
+  attribute float phase;
+  varying vec3 vColor;
+  varying float vTwinkle;
+  uniform float uTime;
+  uniform float uPixelRatio;
+
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+
+    float depthScale = 220.0 / max(42.0, -mvPosition.z);
+    vTwinkle = 0.6 + 0.4 * sin(uTime * (0.55 + size * 0.1) + phase);
+    gl_PointSize = clamp(size * uPixelRatio * depthScale, 0.5, 3.8);
+    vColor = color;
+  }
+`;
+
+const starFragmentShader = `
+  varying vec3 vColor;
+  varying float vTwinkle;
+
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    float core = smoothstep(0.2, 0.0, d);
+    float halo = smoothstep(0.5, 0.06, d);
+    float sparkle = max(abs(uv.x), abs(uv.y));
+    float rays = smoothstep(0.4, 0.0, sparkle) * smoothstep(0.13, 0.0, min(abs(uv.x), abs(uv.y)));
+    float alpha = core * 0.82 + halo * 0.16 + rays * 0.06;
+
+    if (alpha < 0.018) {
+      discard;
+    }
+
+    gl_FragColor = vec4(vColor * (0.74 + vTwinkle * 0.95), alpha * vTwinkle);
+  }
+`;
+
 function mulberry32(seed: number) {
   let value = seed >>> 0;
   return () => {
@@ -172,6 +212,66 @@ function createParticleField(count: number, seed: number, palette: Palette, pixe
   return { geometry, material, points };
 }
 
+function createStarfield(count: number, seed: number, palette: Palette, pixelRatio: number): ParticlePayload {
+  const rand = mulberry32(seed);
+  const positions = new Float32Array(count * 3);
+  const colors = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const phases = new Float32Array(count);
+  const baseColors = [
+    new THREE.Color("#ffffff"),
+    new THREE.Color(palette.colors[0]),
+    new THREE.Color(palette.colors[1]),
+    new THREE.Color(palette.colors[2]),
+  ];
+
+  for (let i = 0; i < count; i += 1) {
+    const i3 = i * 3;
+    const theta = rand() * Math.PI * 2;
+    const phi = Math.acos(2 * rand() - 1);
+    const radius = 76 + Math.pow(rand(), 0.62) * 58;
+    const flatten = 0.44 + rand() * 0.7;
+
+    positions[i3] = Math.sin(phi) * Math.cos(theta) * radius;
+    positions[i3 + 1] = Math.cos(phi) * radius * flatten + gaussian(rand) * 6;
+    positions[i3 + 2] = Math.sin(phi) * Math.sin(theta) * radius;
+
+    const color = baseColors[Math.floor(rand() * baseColors.length)].clone();
+    color.lerp(new THREE.Color("#ffffff"), 0.36 + rand() * 0.48);
+    color.multiplyScalar(0.34 + Math.pow(rand(), 2.2) * 0.78);
+
+    colors[i3] = color.r;
+    colors[i3 + 1] = color.g;
+    colors[i3 + 2] = color.b;
+    sizes[i] = 0.5 + Math.pow(rand(), 5.2) * 4.2;
+    phases[i] = rand() * Math.PI * 2;
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute("phase", new THREE.BufferAttribute(phases, 1));
+
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uPixelRatio: { value: pixelRatio },
+    },
+    vertexShader: starVertexShader,
+    fragmentShader: starFragmentShader,
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;
+
+  return { geometry, material, points };
+}
+
 function createRibbon(seed: number, palette: Palette) {
   const rand = mulberry32(seed);
   const group = new THREE.Group();
@@ -179,35 +279,36 @@ function createRibbon(seed: number, palette: Palette) {
 
   for (let i = 0; i < 7; i += 1) {
     const points: THREE.Vector3[] = [];
-    const radius = 11 + rand() * 33;
+    const radius = 13 + rand() * 32;
     const yShift = -2 + rand() * 4;
-    const phase = rand() * Math.PI * 2;
+    const ovalScale = 0.5 + rand() * 0.18;
 
-    for (let j = 0; j < 92; j += 1) {
-      const t = (j / 91) * Math.PI * 2;
-      const pulse = Math.sin(t * (2 + i * 0.24) + phase) * (1.8 + rand() * 0.2);
+    for (let j = 0; j < 128; j += 1) {
+      const t = (j / 128) * Math.PI * 2;
       points.push(
         new THREE.Vector3(
-          Math.cos(t) * (radius + pulse),
-          yShift + Math.sin(t * 3 + phase) * (1.4 + i * 0.09),
-          Math.sin(t) * (radius * 0.58 + pulse),
+          Math.cos(t) * radius,
+          0,
+          Math.sin(t) * radius * ovalScale,
         ),
       );
     }
 
-    const curve = new THREE.CatmullRomCurve3(points, true, "catmullrom", 0.45);
-    const geometry = new THREE.TubeGeometry(curve, 180, 0.018 + i * 0.004, 6, true);
+    const curve = new THREE.CatmullRomCurve3(points, true, "centripetal");
+    const geometry = new THREE.TubeGeometry(curve, 260, 0.014 + i * 0.003, 6, true);
     const material = new THREE.MeshBasicMaterial({
       color: colors[i % colors.length],
       transparent: true,
-      opacity: 0.18,
+      opacity: 0.15,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.rotation.x = rand() * Math.PI;
-    mesh.rotation.z = rand() * Math.PI;
-    mesh.userData.speed = 0.04 + rand() * 0.08;
+    mesh.position.y = yShift;
+    mesh.rotation.x = rand() * Math.PI * 0.9;
+    mesh.rotation.y = rand() * Math.PI;
+    mesh.rotation.z = rand() * Math.PI * 0.9;
+    mesh.userData.speed = 0.025 + rand() * 0.045;
     group.add(mesh);
   }
 
@@ -319,10 +420,11 @@ export function NebulaCanvas({ settings, palette }: NebulaCanvasProps) {
     scene.add(root);
 
     let pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    let starPayload = createStarfield(26000, settingsRef.current.seed + 700, paletteRef.current, pixelRatio);
     let particlePayload = createParticleField(settingsRef.current.particles, settingsRef.current.seed, paletteRef.current, pixelRatio);
     let ribbons = createRibbon(settingsRef.current.seed + 100, paletteRef.current);
     let core = createCore(paletteRef.current);
-    root.add(particlePayload.points, ribbons, core);
+    root.add(starPayload.points, particlePayload.points, ribbons, core);
 
     let lastSeed = settingsRef.current.seed;
     let lastCount = settingsRef.current.particles;
@@ -339,20 +441,24 @@ export function NebulaCanvas({ settings, palette }: NebulaCanvasProps) {
       composer.setSize(width, height);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      starPayload.material.uniforms.uPixelRatio.value = pixelRatio;
       particlePayload.material.uniforms.uPixelRatio.value = pixelRatio;
     };
 
     const rebuild = () => {
-      root.remove(particlePayload.points, ribbons, core);
+      root.remove(starPayload.points, particlePayload.points, ribbons, core);
+      starPayload.geometry.dispose();
+      starPayload.material.dispose();
       particlePayload.geometry.dispose();
       particlePayload.material.dispose();
       disposeObject(ribbons);
       disposeObject(core);
 
+      starPayload = createStarfield(26000, settingsRef.current.seed + 700, paletteRef.current, pixelRatio);
       particlePayload = createParticleField(settingsRef.current.particles, settingsRef.current.seed, paletteRef.current, pixelRatio);
       ribbons = createRibbon(settingsRef.current.seed + 100, paletteRef.current);
       core = createCore(paletteRef.current);
-      root.add(particlePayload.points, ribbons, core);
+      root.add(starPayload.points, particlePayload.points, ribbons, core);
 
       lastSeed = settingsRef.current.seed;
       lastCount = settingsRef.current.particles;
@@ -385,6 +491,7 @@ export function NebulaCanvas({ settings, palette }: NebulaCanvasProps) {
 
       particlePayload.material.uniforms.uTime.value = time;
       particlePayload.material.uniforms.uWarp.value = activeSettings.warp;
+      starPayload.material.uniforms.uTime.value = time;
 
       root.rotation.y += delta * speed * (0.035 + activeSettings.warp * 0.025);
       root.rotation.x = smoothPointer.y * 0.08;
@@ -428,7 +535,9 @@ export function NebulaCanvas({ settings, palette }: NebulaCanvasProps) {
       window.cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
       mount.removeEventListener("pointermove", onPointerMove);
-      root.remove(particlePayload.points, ribbons, core);
+      root.remove(starPayload.points, particlePayload.points, ribbons, core);
+      starPayload.geometry.dispose();
+      starPayload.material.dispose();
       particlePayload.geometry.dispose();
       particlePayload.material.dispose();
       disposeObject(ribbons);
